@@ -25,7 +25,7 @@ type DayEntry = {
   mood: Mood | null;
   note: string;
   completedGoalIndexes: number[];
-  imageDataUrl?: string;
+  imageDataUrl: string;
 };
 
 type Goal = {
