@@ -45,7 +45,7 @@ const STORAGE_KEY = "ten-day-challenge-v1";
 const AI_SETTINGS_KEY = "ten-day-ai-settings-v1";
 const YEARLY_SUMMARY_KEY = "ten-day-yearly-summary-v1";
 
-type AiProvider = "openai" | "doubao" | "claude" | "custom";
+type AiProvider = "openai" | "claude" | "custom";
 
 type AiSettings = {
   provider: AiProvider;
@@ -459,7 +459,10 @@ export default function Home() {
   const [editingName, setEditingName] = useState("");
   const [imageError, setImageError] = useState("");
   const [selectedDayIndex, setSelectedDayIndex] = useState(0);
+  const [isEditingRecordedDay, setIsEditingRecordedDay] = useState(false);
+  const [saveToast, setSaveToast] = useState("");
   const [isGeneratingShare, setIsGeneratingShare] = useState(false);
+  const [shouldRenderShareCard, setShouldRenderShareCard] = useState(false);
   const [shareImageUrl, setShareImageUrl] = useState("");
   const [shareError, setShareError] = useState("");
   const [aiSettings, setAiSettings] = useState<AiSettings>(DEFAULT_AI_SETTINGS);
@@ -494,7 +497,6 @@ export default function Home() {
         setAiSettings({
           provider:
             parsed.provider === "openai" ||
-            parsed.provider === "doubao" ||
             parsed.provider === "claude" ||
             parsed.provider === "custom"
               ? parsed.provider
@@ -575,6 +577,14 @@ export default function Home() {
       setSelectedDayIndex(currentDayIndex);
     }
   }, [currentDayIndex, selectedDayIndex]);
+  useEffect(() => {
+    setIsEditingRecordedDay(false);
+  }, [safeSelectedDayIndex]);
+  useEffect(() => {
+    if (!saveToast) return;
+    const timer = window.setTimeout(() => setSaveToast(""), 1800);
+    return () => window.clearTimeout(timer);
+  }, [saveToast]);
   const currentDayDisplay = currentDayIndex + 1;
   const completedDays = useMemo(
     () => challenge?.entries.filter((entry) => entry.completed === true).length ?? 0,
@@ -591,12 +601,23 @@ export default function Home() {
     [challenge, yearlySummary, currentYearKey],
   );
 
+  const cycleGoalStats = useMemo(
+    () =>
+      challenge?.goals.map((goal, goalIndex) => ({
+        ...goal,
+        completionCount: challenge.entries.filter((entry) =>
+          entry.completedGoalIndexes.includes(goalIndex),
+        ).length,
+      })) ?? [],
+    [challenge],
+  );
+
   function saveToday(completed: boolean) {
     if (!challenge) return;
     const todayEntry = challenge.entries[safeSelectedDayIndex];
     const goalCount = challenge.goals.length;
     if (completed && goalCount >= 2 && todayEntry.completedGoalIndexes.length === 0) {
-      return;
+      return false;
     }
     const nextCompletedGoals =
       goalCount === 1
@@ -654,6 +675,10 @@ export default function Home() {
         return { ...prev, [currentYearKey]: nextForYear };
       });
     }
+    setIsEditingRecordedDay(false);
+    setSaveToast(completed ? "今日记录已保存" : "今天已标记为跳过");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    return true;
   }
 
   function updateGoalTitle(goalIndex: number, title: string) {
@@ -666,8 +691,18 @@ export default function Home() {
 
   function updateGoalType(goalIndex: number, type: GoalType) {
     if (!challenge) return;
+    const prevGoal = challenge.goals[goalIndex];
+    if (!prevGoal) return;
+    const shouldAutoUpdateTitle =
+      prevGoal.title.trim() === GOAL_DEFAULT_TITLE[prevGoal.type];
     const nextGoals = challenge.goals.map((goal, index) =>
-      index === goalIndex ? { ...goal, type, title: GOAL_DEFAULT_TITLE[type] } : goal,
+      index === goalIndex
+        ? {
+            ...goal,
+            type,
+            title: shouldAutoUpdateTitle ? GOAL_DEFAULT_TITLE[type] : goal.title,
+          }
+        : goal,
     );
     setChallenge({ ...challenge, goals: nextGoals });
   }
@@ -677,7 +712,7 @@ export default function Home() {
     if (challenge.goals.length >= 3) return;
     const nextGoals = [
       ...challenge.goals,
-      { title: `目标 ${challenge.goals.length + 1}`, type: "custom" as GoalType },
+      { title: GOAL_DEFAULT_TITLE.custom, type: "custom" as GoalType },
     ];
     setChallenge({ ...challenge, goals: nextGoals });
   }
@@ -749,6 +784,13 @@ export default function Home() {
   const primaryGoalType = challenge.goals[0]?.type;
   const isSingleGoal = challenge.goals.length === 1;
   const canCompleteToday = isSingleGoal || todayEntry.completedGoalIndexes.length > 0;
+  const isSelectedDayRecorded = todayEntry.completed !== null;
+  const showEditingForm = !isSelectedDayRecorded || isEditingRecordedDay;
+  const progressSectionTitle = showEditingForm
+    ? "今日进展"
+    : safeSelectedDayIndex === currentDayIndex
+      ? "今日记录"
+      : `第 ${safeSelectedDayIndex + 1} 天记录`;
   const shouldShowReviewCard =
     currentDayDisplay === 10 || challenge.entries.every((entry) => entry.completed !== null);
   const moodStats = challenge.entries.reduce(
@@ -790,7 +832,7 @@ export default function Home() {
     setIsGeneratingAiReview(true);
     setAiReviewError("");
     try {
-      const prompt = buildPromptFromChallengeData(challenge, completedDays, moodStats, goalStats);
+      const prompt = buildPromptFromChallengeData(challenge, completedDays, moodStats, cycleGoalStats);
       const text = await generateAiReview(aiSettings, prompt);
       setAiReviewText(text);
     } catch {
@@ -813,10 +855,18 @@ export default function Home() {
   }
 
   async function generateShareCard() {
-    if (!shareCardRef.current) return;
     setIsGeneratingShare(true);
     setShareError("");
+    setShouldRenderShareCard(true);
     try {
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => resolve());
+        });
+      });
+      if (!shareCardRef.current) {
+        throw new Error("share_card_not_ready");
+      }
       const dataUrl = await toPng(shareCardRef.current, {
         pixelRatio: 2,
         cacheBust: true,
@@ -827,18 +877,24 @@ export default function Home() {
     } catch {
       setShareError("分享图生成失败，请稍后再试");
     } finally {
+      setShouldRenderShareCard(false);
       setIsGeneratingShare(false);
     }
   }
 
   return (
     <main className="min-h-screen bg-[radial-gradient(120%_80%_at_50%_0%,#f1f5f9_0%,#f8fafc_44%,#fafafa_100%)] px-4 py-5 text-zinc-900">
+      {saveToast && (
+        <div className="fixed left-1/2 top-4 z-30 -translate-x-1/2 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs text-emerald-700 shadow-sm">
+          {saveToast}
+        </div>
+      )}
       <div className="mx-auto flex w-full max-w-md flex-col gap-4 pb-14">
-        <section className="rounded-[24px] border border-slate-200/60 bg-gradient-to-b from-white to-slate-50/60 px-5 py-4 shadow-[0_12px_24px_-20px_rgba(15,23,42,0.42)]">
-          <h1 className="text-[28px] font-semibold tracking-tight text-slate-950">TenDay</h1>
-          <div className="mt-1 flex items-center justify-between gap-3 text-xs text-slate-500">
-            <p>把一年拆成36个小周期</p>
-            <p className="text-[11px] text-slate-400">Designed By VincentXXH</p>
+        <section className="rounded-[24px] border border-slate-200/60 bg-gradient-to-b from-white to-slate-50/60 px-5 py-4.5 shadow-[0_12px_24px_-20px_rgba(15,23,42,0.42)]">
+          <h1 className="text-[30px] font-semibold tracking-tight text-slate-950">TenDay</h1>
+          <div className="mt-1.5 flex items-center justify-between gap-3 text-xs text-slate-500">
+            <p className="text-[12px] text-slate-500">把一年拆成36个小周期</p>
+            <p className="text-[10px] text-slate-400">Designed By VincentXXH</p>
           </div>
         </section>
         <section className="relative rounded-[30px] border border-slate-200/60 bg-gradient-to-br from-white via-slate-50 to-indigo-50/60 p-5 shadow-[0_16px_36px_-24px_rgba(30,41,59,0.5)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_20px_40px_-26px_rgba(30,41,59,0.56)]">
@@ -1011,150 +1067,204 @@ export default function Home() {
         </section>
 
         <section className="rounded-[30px] border border-indigo-100/80 bg-gradient-to-b from-white via-slate-50/50 to-indigo-50/40 p-5 shadow-[0_18px_34px_-26px_rgba(30,41,59,0.5)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_22px_38px_-26px_rgba(30,41,59,0.56)]">
-          <h3 className="text-sm font-semibold text-slate-900">今日进展</h3>
+          <h3 className="text-sm font-semibold text-slate-900">{progressSectionTitle}</h3>
           {safeSelectedDayIndex < currentDayIndex && (
             <p className="mt-1 text-xs text-slate-400">正在补记录：第 {safeSelectedDayIndex + 1} 天</p>
           )}
-          <p className="mt-1 text-xs text-slate-400">先记录状态，再决定今天是否算完成。</p>
-
-          <p className="mt-3 text-xs text-slate-400">今天的状态如何？</p>
-          <div className="mt-2 grid grid-cols-3 gap-2">
-            {(["hard", "okay", "great"] as Mood[]).map((mood) => (
-              <button
-                key={mood}
-                type="button"
-                onClick={() => {
-                  const nextEntries = challenge.entries.map((entry) =>
-                    entry.dayIndex === safeSelectedDayIndex ? { ...entry, mood } : entry,
-                  );
-                  setChallenge({ ...challenge, entries: nextEntries });
-                }}
-                className={`rounded-xl px-3 py-2.5 text-sm capitalize transition-all duration-200 active:scale-[0.98] ${
-                  todayEntry.mood === mood
-                    ? `${MOOD_STYLE[mood]} scale-[1.02] shadow-sm`
-                    : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300"
-                }`}
-              >
-                {mood === "hard" ? "有点难" : mood === "okay" ? "还可以" : "状态好"}
-              </button>
-            ))}
-          </div>
-
-          {challenge.goals.length >= 2 && (
-            <div className="mt-4">
-              <p className="text-xs text-slate-400">今天完成了哪些目标？</p>
-              <div className="mt-2 flex flex-col gap-2">
-                {challenge.goals.map((goal, goalIndex) => (
-                  <label
-                    key={`${goal.title}-${goalIndex}`}
-                    className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition-all duration-200 hover:border-slate-300 active:scale-[0.995]"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={todayEntry.completedGoalIndexes.includes(goalIndex)}
-                      onChange={() => {
-                        const nextSelected = todayEntry.completedGoalIndexes.includes(goalIndex)
-                          ? todayEntry.completedGoalIndexes.filter((index) => index !== goalIndex)
-                          : [...todayEntry.completedGoalIndexes, goalIndex];
-                        const nextEntries = challenge.entries.map((entry) =>
-                          entry.dayIndex === safeSelectedDayIndex
-                            ? { ...entry, completedGoalIndexes: nextSelected }
-                            : entry,
-                        );
-                        setChallenge({ ...challenge, entries: nextEntries });
-                      }}
-                      className="h-4 w-4 accent-indigo-500"
-                    />
-                    <span className="flex-1">{goal.title}</span>
-                    <span className="text-xs text-slate-500">{GOAL_TYPE_ZH[goal.type]}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
+          {showEditingForm && (
+            <p className="mt-1 text-xs text-slate-400">先记录状态，再决定今天是否算完成。</p>
           )}
-
-          <div className="mt-4">
-            <div className="flex items-center justify-between">
-              <label className="text-xs text-slate-400">今日图片（可选）</label>
-              {todayEntry.imageDataUrl && (
-                <button
-                  type="button"
-                  onClick={removeTodayImage}
-                className="text-xs text-slate-500 transition-all duration-200 hover:text-rose-500 active:scale-[0.98]"
-                >
-                  删除图片
-                </button>
-              )}
-            </div>
-            <label className="mt-2 block cursor-pointer rounded-2xl border border-dashed border-slate-300 bg-white/85 p-3 text-center text-xs text-slate-500 transition-all duration-200 hover:-translate-y-0.5 hover:border-indigo-300 hover:bg-indigo-50/50 hover:shadow-sm active:translate-y-0">
-              {todayEntry.imageDataUrl ? "更换图片" : "上传今天的一张图片"}
-              <input
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={(event) => {
-                  void handleImageUpload(event.target.files?.[0] ?? null);
-                  event.currentTarget.value = "";
-                }}
-              />
-            </label>
-            {imageError && <p className="mt-2 text-xs text-rose-500">{imageError}</p>}
-            {todayEntry.imageDataUrl && (
-              <NextImage
-                src={todayEntry.imageDataUrl}
-                alt="今日记录图片"
-                width={320}
-                height={96}
-                unoptimized
-                className="mt-2 h-24 w-full rounded-xl border border-slate-200 object-cover"
-              />
-            )}
-          </div>
-
-          <label className="mt-4 block text-xs text-slate-400">记录一下今天（可选）</label>
-          <textarea
-            className="mt-2 w-full resize-none rounded-2xl border border-slate-200 bg-white p-3 text-sm outline-none transition focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100"
-            rows={3}
-            value={todayEntry.note}
-            onChange={(event) => {
-              const nextEntries = challenge.entries.map((entry) =>
-                entry.dayIndex === safeSelectedDayIndex ? { ...entry, note: event.target.value } : entry,
-              );
-              setChallenge({ ...challenge, entries: nextEntries });
-            }}
-            placeholder="写点什么，记录一下今天"
-          />
-
-          {todayEntry?.mood && (
-            <p className="mt-2 text-xs text-slate-400">
-              今天已记录状态：
-              <span className="ml-1 font-medium">
+          {!showEditingForm ? (
+            <div className="mt-3 rounded-2xl border border-slate-200 bg-white p-3">
+              <p className="text-base font-semibold text-slate-900">
+                {safeSelectedDayIndex === currentDayIndex ? "今日已记录" : `第 ${safeSelectedDayIndex + 1} 天已记录`}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {todayEntry.completed ? "完成今日" : "今天跳过"} ·{" "}
                 {todayEntry.mood === "hard"
                   ? "有点难"
                   : todayEntry.mood === "okay"
                     ? "还可以"
-                    : "状态好"}
-              </span>
-            </p>
-          )}
+                    : todayEntry.mood === "great"
+                      ? "状态好"
+                      : "未记录状态"}
+              </p>
+              {todayEntry.completedGoalIndexes.length > 0 && (
+                <p className="mt-1 text-xs text-slate-500">
+                  已完成目标：
+                  {todayEntry.completedGoalIndexes
+                    .map((goalIndex) => challenge.goals[goalIndex]?.title)
+                    .filter(Boolean)
+                    .join("、")}
+                </p>
+              )}
+              {todayEntry.note && <p className="mt-1 line-clamp-2 text-xs text-slate-500">{todayEntry.note}</p>}
+              {todayEntry.imageDataUrl && (
+                <NextImage
+                  src={todayEntry.imageDataUrl}
+                  alt="记录缩略图"
+                  width={320}
+                  height={96}
+                  unoptimized
+                  className="mt-2 h-20 w-full rounded-xl border border-slate-200 object-cover"
+                />
+              )}
+              <button
+                type="button"
+                onClick={() => setIsEditingRecordedDay(true)}
+                className="mt-3 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 transition-all duration-200 hover:bg-slate-50 active:scale-[0.98]"
+              >
+                修改记录
+              </button>
+            </div>
+          ) : (
+            <>
+              <p className="mt-3 text-xs text-slate-400">今天的状态如何？</p>
+              <div className="mt-2 grid grid-cols-3 gap-2">
+                {(["hard", "okay", "great"] as Mood[]).map((mood) => (
+                  <button
+                    key={mood}
+                    type="button"
+                    onClick={() => {
+                      const nextEntries = challenge.entries.map((entry) =>
+                        entry.dayIndex === safeSelectedDayIndex ? { ...entry, mood } : entry,
+                      );
+                      setChallenge({ ...challenge, entries: nextEntries });
+                    }}
+                    className={`rounded-xl px-3 py-2.5 text-sm capitalize transition-all duration-200 active:scale-[0.98] ${
+                      todayEntry.mood === mood
+                        ? `${MOOD_STYLE[mood]} scale-[1.02] shadow-sm`
+                        : "border border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                    }`}
+                  >
+                    {mood === "hard" ? "有点难" : mood === "okay" ? "还可以" : "状态好"}
+                  </button>
+                ))}
+              </div>
 
-          <div className="mt-4 grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => saveToday(true)}
-              disabled={!canCompleteToday}
-              className="rounded-2xl bg-slate-900 px-3 py-3 text-sm font-medium text-white transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 hover:shadow-md active:scale-[0.98] active:translate-y-0 disabled:cursor-not-allowed disabled:bg-slate-300"
-            >
-              {isSingleGoal ? getCompletedActionCopy(primaryGoalType) : "完成今日"}
-            </button>
-            <button
-              type="button"
-              onClick={() => saveToday(false)}
-              className="rounded-2xl border border-slate-300 bg-white px-3 py-3 text-sm font-medium text-slate-700 transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-50 hover:shadow-sm active:scale-[0.98] active:translate-y-0"
-            >
-              今天跳过
-            </button>
-          </div>
+              {challenge.goals.length >= 2 && (
+                <div className="mt-4">
+                  <p className="text-xs text-slate-400">今天完成了哪些目标？</p>
+                  <div className="mt-2 flex flex-col gap-2">
+                    {challenge.goals.map((goal, goalIndex) => (
+                      <label
+                        key={`${goal.title}-${goalIndex}`}
+                        className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm transition-all duration-200 hover:border-slate-300 active:scale-[0.995]"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={todayEntry.completedGoalIndexes.includes(goalIndex)}
+                          onChange={() => {
+                            const nextSelected = todayEntry.completedGoalIndexes.includes(goalIndex)
+                              ? todayEntry.completedGoalIndexes.filter((index) => index !== goalIndex)
+                              : [...todayEntry.completedGoalIndexes, goalIndex];
+                            const nextEntries = challenge.entries.map((entry) =>
+                              entry.dayIndex === safeSelectedDayIndex
+                                ? { ...entry, completedGoalIndexes: nextSelected }
+                                : entry,
+                            );
+                            setChallenge({ ...challenge, entries: nextEntries });
+                          }}
+                          className="h-4 w-4 accent-indigo-500"
+                        />
+                        <span className="flex-1">{goal.title}</span>
+                        <span className="text-xs text-slate-500">{GOAL_TYPE_ZH[goal.type]}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-4">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs text-slate-400">今日图片（可选）</label>
+                  {todayEntry.imageDataUrl && (
+                    <button
+                      type="button"
+                      onClick={removeTodayImage}
+                      className="text-xs text-slate-500 transition-all duration-200 hover:text-rose-500 active:scale-[0.98]"
+                    >
+                      删除图片
+                    </button>
+                  )}
+                </div>
+                <label className="mt-2 block cursor-pointer rounded-2xl border border-dashed border-slate-300 bg-white/85 p-3 text-center text-xs text-slate-500 transition-all duration-200 hover:-translate-y-0.5 hover:border-indigo-300 hover:bg-indigo-50/50 hover:shadow-sm active:translate-y-0">
+                  {todayEntry.imageDataUrl ? "更换图片" : "上传今天的一张图片"}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(event) => {
+                      void handleImageUpload(event.target.files?.[0] ?? null);
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                </label>
+                {imageError && <p className="mt-2 text-xs text-rose-500">{imageError}</p>}
+                {todayEntry.imageDataUrl && (
+                  <NextImage
+                    src={todayEntry.imageDataUrl}
+                    alt="今日记录图片"
+                    width={320}
+                    height={96}
+                    unoptimized
+                    className="mt-2 h-24 w-full rounded-xl border border-slate-200 object-cover"
+                  />
+                )}
+              </div>
+
+              <label className="mt-4 block text-xs text-slate-400">记录一下今天（可选）</label>
+              <textarea
+                className="mt-2 w-full resize-none rounded-2xl border border-slate-200 bg-white p-3 text-[16px] leading-6 outline-none transition focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100"
+                rows={3}
+                value={todayEntry.note}
+                onChange={(event) => {
+                  const nextEntries = challenge.entries.map((entry) =>
+                    entry.dayIndex === safeSelectedDayIndex ? { ...entry, note: event.target.value } : entry,
+                  );
+                  setChallenge({ ...challenge, entries: nextEntries });
+                }}
+                placeholder="写点什么，记录一下今天"
+              />
+
+              {todayEntry?.mood && (
+                <p className="mt-2 text-xs text-slate-400">
+                  今天已记录状态：
+                  <span className="ml-1 font-medium">
+                    {todayEntry.mood === "hard"
+                      ? "有点难"
+                      : todayEntry.mood === "okay"
+                        ? "还可以"
+                        : "状态好"}
+                  </span>
+                </p>
+              )}
+
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const saved = saveToday(true);
+                    if (!saved) return;
+                  }}
+                  disabled={!canCompleteToday}
+                  className="rounded-2xl bg-slate-900 px-3 py-3 text-sm font-medium text-white transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-800 hover:shadow-md active:scale-[0.98] active:translate-y-0 disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  {isSingleGoal ? getCompletedActionCopy(primaryGoalType) : "完成今日"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const saved = saveToday(false);
+                    if (!saved) return;
+                  }}
+                  className="rounded-2xl border border-slate-300 bg-white px-3 py-3 text-sm font-medium text-slate-700 transition-all duration-200 hover:-translate-y-0.5 hover:bg-slate-50 hover:shadow-sm active:scale-[0.98] active:translate-y-0"
+                >
+                  今天跳过
+                </button>
+              </div>
+            </>
+          )}
         </section>
 
         {shouldShowReviewCard && (
@@ -1169,7 +1279,7 @@ export default function Home() {
               <p>状态好 {moodStats.great} 天</p>
             </div>
             <div className="mt-2 rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-600">
-              {goalStats.map((goal) => (
+              {cycleGoalStats.map((goal) => (
                 <p key={`${goal.title}-${goal.type}`}>{goal.title}：{goal.completionCount} 次</p>
               ))}
             </div>
@@ -1247,7 +1357,6 @@ export default function Home() {
                   className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-700 outline-none focus:border-indigo-300"
                 >
                   <option value="openai">OpenAI</option>
-                  <option value="doubao">豆包</option>
                   <option value="claude">Claude</option>
                   <option value="custom">Custom</option>
                 </select>
@@ -1262,7 +1371,7 @@ export default function Home() {
                   className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-700 outline-none focus:border-indigo-300"
                 />
               </div>
-              {(aiSettings.provider === "custom" || aiSettings.provider === "doubao") && (
+              {aiSettings.provider === "custom" && (
                 <div>
                   <label className="text-xs text-slate-400">Base URL（可选）</label>
                   <input
@@ -1287,57 +1396,59 @@ export default function Home() {
           )}
         </section>
       </div>
-      <div className="pointer-events-none fixed -left-[9999px] top-0 opacity-0">
-        <div
-          ref={shareCardRef}
-          className="h-[1440px] w-[1080px] bg-[radial-gradient(120%_90%_at_50%_0%,#eef2ff_0%,#f8fafc_45%,#ffffff_100%)] p-16 text-slate-900"
-        >
-          <div className="h-full rounded-[44px] border border-slate-200/70 bg-white/90 p-14 shadow-[0_28px_60px_-36px_rgba(15,23,42,0.4)]">
-            <p className="text-sm tracking-[0.18em] text-slate-400">TenDay</p>
-            <h2 className="mt-2 text-5xl font-semibold tracking-tight text-slate-950">把一年拆成36个小周期</h2>
-            <div className="mt-12 rounded-3xl border border-slate-200 bg-gradient-to-b from-white to-slate-50 p-8">
-              <p className="text-sm text-slate-400">本轮计划</p>
-              <p className="mt-2 text-4xl font-semibold text-slate-950">{challenge.name}</p>
-              <p className="mt-3 text-xl text-slate-500">
-                {formatDate(challenge.startDate)} - {formatDate(challenge.endDate)}
+      {shouldRenderShareCard && (
+        <div className="pointer-events-none fixed -left-[9999px] top-0 opacity-0">
+          <div
+            ref={shareCardRef}
+            className="h-[1440px] w-[1080px] bg-[radial-gradient(120%_90%_at_50%_0%,#eef2ff_0%,#f8fafc_45%,#ffffff_100%)] p-16 text-slate-900"
+          >
+            <div className="h-full rounded-[44px] border border-slate-200/70 bg-white/90 p-14 shadow-[0_28px_60px_-36px_rgba(15,23,42,0.4)]">
+              <p className="text-sm tracking-[0.18em] text-slate-400">TenDay</p>
+              <h2 className="mt-2 text-5xl font-semibold tracking-tight text-slate-950">把一年拆成36个小周期</h2>
+              <div className="mt-12 rounded-3xl border border-slate-200 bg-gradient-to-b from-white to-slate-50 p-8">
+                <p className="text-sm text-slate-400">本轮计划</p>
+                <p className="mt-2 text-4xl font-semibold text-slate-950">{challenge.name}</p>
+                <p className="mt-3 text-xl text-slate-500">
+                  {formatDate(challenge.startDate)} - {formatDate(challenge.endDate)}
+                </p>
+              </div>
+              <div className="mt-8 grid grid-cols-2 gap-5">
+                <div className="rounded-2xl border border-slate-200 bg-white p-6">
+                  <p className="text-sm text-slate-400">完成情况</p>
+                  <p className="mt-2 text-4xl font-semibold text-slate-950">{completedDays} / 10 天</p>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
+                  <p className="text-slate-400">情绪分布</p>
+                  <p className="mt-2">有点难 {moodStats.hard} 天</p>
+                  <p>还可以 {moodStats.okay} 天</p>
+                  <p>状态好 {moodStats.great} 天</p>
+                </div>
+              </div>
+              <div className="mt-8 grid grid-cols-10 gap-2">
+                {challenge.entries.map((entry) => (
+                  <div
+                    key={`share-${entry.dayIndex}`}
+                    className={`h-10 rounded-lg border ${getDayStateClass(entry)} ${
+                      entry.dayIndex === currentDayIndex ? "ring-2 ring-indigo-500/80" : ""
+                    }`}
+                  />
+                ))}
+              </div>
+              <div className="mt-8 rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
+                <p className="text-slate-400">目标完成</p>
+                {cycleGoalStats.map((goal) => (
+                  <p key={`share-goal-${goal.title}-${goal.type}`} className="mt-1">
+                    {goal.title}：{goal.completionCount} 次
+                  </p>
+                ))}
+              </div>
+              <p className="mt-10 text-center text-2xl text-slate-700">
+                不用一下改变很多，先完成下一个10天
               </p>
             </div>
-            <div className="mt-8 grid grid-cols-2 gap-5">
-              <div className="rounded-2xl border border-slate-200 bg-white p-6">
-                <p className="text-sm text-slate-400">完成情况</p>
-                <p className="mt-2 text-4xl font-semibold text-slate-950">{completedDays} / 10 天</p>
-              </div>
-              <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
-                <p className="text-slate-400">情绪分布</p>
-                <p className="mt-2">有点难 {moodStats.hard} 天</p>
-                <p>还可以 {moodStats.okay} 天</p>
-                <p>状态好 {moodStats.great} 天</p>
-              </div>
-            </div>
-            <div className="mt-8 grid grid-cols-10 gap-2">
-              {challenge.entries.map((entry) => (
-                <div
-                  key={`share-${entry.dayIndex}`}
-                  className={`h-10 rounded-lg border ${getDayStateClass(entry)} ${
-                    entry.dayIndex === currentDayIndex ? "ring-2 ring-indigo-500/80" : ""
-                  }`}
-                />
-              ))}
-            </div>
-            <div className="mt-8 rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
-              <p className="text-slate-400">目标完成</p>
-              {goalStats.map((goal) => (
-                <p key={`share-goal-${goal.title}-${goal.type}`} className="mt-1">
-                  {goal.title}：{goal.completionCount} 次
-                </p>
-              ))}
-            </div>
-            <p className="mt-10 text-center text-2xl text-slate-700">
-              不用一下改变很多，先完成下一个10天
-            </p>
           </div>
         </div>
-      </div>
+      )}
     </main>
   );
 }
