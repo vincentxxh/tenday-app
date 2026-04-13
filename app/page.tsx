@@ -43,6 +43,7 @@ type Challenge = {
 
 const STORAGE_KEY = "ten-day-challenge-v1";
 const AI_SETTINGS_KEY = "ten-day-ai-settings-v1";
+const YEARLY_SUMMARY_KEY = "ten-day-yearly-summary-v1";
 
 type AiProvider = "openai" | "doubao" | "claude" | "custom";
 
@@ -52,6 +53,8 @@ type AiSettings = {
   baseUrl: string;
   model: string;
 };
+
+type YearlySummary = Record<string, Record<GoalType, number>>;
 
 const DEFAULT_AI_SETTINGS: AiSettings = {
   provider: "openai",
@@ -99,6 +102,21 @@ const GOAL_TYPE_OPTIONS: GoalType[] = [
   "organizing",
   "custom",
 ];
+
+const GOAL_DEFAULT_TITLE: Record<GoalType, string> = {
+  reading: "阅读20分钟",
+  workout: "训练30分钟",
+  study: "学习30分钟",
+  writing: "输出15分钟",
+  "healthy eating": "健康饮食1天",
+  sleep: "23:30前睡觉",
+  water: "喝够8杯水",
+  journaling: "写50字日记",
+  photo: "拍1张照片",
+  meditation: "冥想10分钟",
+  organizing: "整理10分钟",
+  custom: "目标内容",
+};
 
 const MOOD_STYLE: Record<Mood, string> = {
   hard: "border border-orange-300 bg-orange-50 text-orange-900 shadow-[inset_0_0_0_1px_rgba(251,146,60,0.25)]",
@@ -445,6 +463,7 @@ export default function Home() {
   const [shareImageUrl, setShareImageUrl] = useState("");
   const [shareError, setShareError] = useState("");
   const [aiSettings, setAiSettings] = useState<AiSettings>(DEFAULT_AI_SETTINGS);
+  const [yearlySummary, setYearlySummary] = useState<YearlySummary>({});
   const [isGeneratingAiReview, setIsGeneratingAiReview] = useState(false);
   const [aiReviewText, setAiReviewText] = useState("");
   const [aiReviewError, setAiReviewError] = useState("");
@@ -488,6 +507,14 @@ export default function Home() {
         // Ignore broken AI settings.
       }
     }
+    const savedSummary = window.localStorage.getItem(YEARLY_SUMMARY_KEY);
+    if (savedSummary) {
+      try {
+        setYearlySummary(JSON.parse(savedSummary) as YearlySummary);
+      } catch {
+        // Ignore broken summary.
+      }
+    }
     setIsHydrated(true);
   }, []);
 
@@ -500,6 +527,39 @@ export default function Home() {
     if (!isHydrated) return;
     window.localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify(aiSettings));
   }, [aiSettings, isHydrated]);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+    window.localStorage.setItem(YEARLY_SUMMARY_KEY, JSON.stringify(yearlySummary));
+  }, [yearlySummary, isHydrated]);
+
+  useEffect(() => {
+    if (!isHydrated || !challenge || !clientToday) return;
+    const yearKey = String(clientToday.getFullYear());
+    if (yearlySummary[yearKey]) return;
+    const initial: Record<GoalType, number> = {
+      reading: 0,
+      workout: 0,
+      study: 0,
+      writing: 0,
+      "healthy eating": 0,
+      sleep: 0,
+      water: 0,
+      journaling: 0,
+      photo: 0,
+      meditation: 0,
+      organizing: 0,
+      custom: 0,
+    };
+    challenge.entries.forEach((entry) => {
+      if (entry.completed !== true) return;
+      entry.completedGoalIndexes.forEach((goalIndex) => {
+        const type = challenge.goals[goalIndex]?.type;
+        if (type) initial[type] += 1;
+      });
+    });
+    setYearlySummary((prev) => ({ ...prev, [yearKey]: initial }));
+  }, [isHydrated, challenge, clientToday, yearlySummary]);
 
   const progress = useMemo(
     () => (clientToday ? getYearProgress(clientToday) : { percent: 0, block: 1 }),
@@ -520,16 +580,15 @@ export default function Home() {
     () => challenge?.entries.filter((entry) => entry.completed === true).length ?? 0,
     [challenge],
   );
+  const currentYearKey = String((clientToday ?? new Date()).getFullYear());
 
   const goalStats = useMemo(
     () =>
-      challenge?.goals.map((goal, goalIndex) => ({
+      challenge?.goals.map((goal) => ({
         ...goal,
-        completionCount: challenge.entries.filter((entry) =>
-          entry.completedGoalIndexes.includes(goalIndex),
-        ).length,
+        completionCount: yearlySummary[currentYearKey]?.[goal.type] ?? 0,
       })) ?? [],
-    [challenge],
+    [challenge, yearlySummary, currentYearKey],
   );
 
   function saveToday(completed: boolean) {
@@ -559,6 +618,42 @@ export default function Home() {
         : entry,
     );
     setChallenge({ ...challenge, entries: nextEntries });
+
+    const deltaByType: Partial<Record<GoalType, number>> = {};
+    if (todayEntry.completed === true) {
+      todayEntry.completedGoalIndexes.forEach((goalIndex) => {
+        const type = challenge.goals[goalIndex]?.type;
+        if (type) deltaByType[type] = (deltaByType[type] ?? 0) - 1;
+      });
+    }
+    if (completed === true) {
+      nextCompletedGoals.forEach((goalIndex) => {
+        const type = challenge.goals[goalIndex]?.type;
+        if (type) deltaByType[type] = (deltaByType[type] ?? 0) + 1;
+      });
+    }
+    if (Object.keys(deltaByType).length > 0) {
+      setYearlySummary((prev) => {
+        const nextForYear: Record<GoalType, number> = {
+          reading: Math.max(0, (prev[currentYearKey]?.reading ?? 0) + (deltaByType.reading ?? 0)),
+          workout: Math.max(0, (prev[currentYearKey]?.workout ?? 0) + (deltaByType.workout ?? 0)),
+          study: Math.max(0, (prev[currentYearKey]?.study ?? 0) + (deltaByType.study ?? 0)),
+          writing: Math.max(0, (prev[currentYearKey]?.writing ?? 0) + (deltaByType.writing ?? 0)),
+          "healthy eating": Math.max(
+            0,
+            (prev[currentYearKey]?.["healthy eating"] ?? 0) + (deltaByType["healthy eating"] ?? 0),
+          ),
+          sleep: Math.max(0, (prev[currentYearKey]?.sleep ?? 0) + (deltaByType.sleep ?? 0)),
+          water: Math.max(0, (prev[currentYearKey]?.water ?? 0) + (deltaByType.water ?? 0)),
+          journaling: Math.max(0, (prev[currentYearKey]?.journaling ?? 0) + (deltaByType.journaling ?? 0)),
+          photo: Math.max(0, (prev[currentYearKey]?.photo ?? 0) + (deltaByType.photo ?? 0)),
+          meditation: Math.max(0, (prev[currentYearKey]?.meditation ?? 0) + (deltaByType.meditation ?? 0)),
+          organizing: Math.max(0, (prev[currentYearKey]?.organizing ?? 0) + (deltaByType.organizing ?? 0)),
+          custom: Math.max(0, (prev[currentYearKey]?.custom ?? 0) + (deltaByType.custom ?? 0)),
+        };
+        return { ...prev, [currentYearKey]: nextForYear };
+      });
+    }
   }
 
   function updateGoalTitle(goalIndex: number, title: string) {
@@ -572,7 +667,7 @@ export default function Home() {
   function updateGoalType(goalIndex: number, type: GoalType) {
     if (!challenge) return;
     const nextGoals = challenge.goals.map((goal, index) =>
-      index === goalIndex ? { ...goal, type } : goal,
+      index === goalIndex ? { ...goal, type, title: GOAL_DEFAULT_TITLE[type] } : goal,
     );
     setChallenge({ ...challenge, goals: nextGoals });
   }
@@ -741,7 +836,10 @@ export default function Home() {
       <div className="mx-auto flex w-full max-w-md flex-col gap-4 pb-14">
         <section className="rounded-[24px] border border-slate-200/60 bg-gradient-to-b from-white to-slate-50/60 px-5 py-4 shadow-[0_12px_24px_-20px_rgba(15,23,42,0.42)]">
           <h1 className="text-[28px] font-semibold tracking-tight text-slate-950">TenDay</h1>
-          <p className="mt-1 text-sm text-slate-500">把一年拆成36个小周期</p>
+          <div className="mt-1 flex items-center justify-between gap-3 text-xs text-slate-500">
+            <p>把一年拆成36个小周期</p>
+            <p className="text-[11px] text-slate-400">Designed By VincentXXH</p>
+          </div>
         </section>
         <section className="relative rounded-[30px] border border-slate-200/60 bg-gradient-to-br from-white via-slate-50 to-indigo-50/60 p-5 shadow-[0_16px_36px_-24px_rgba(30,41,59,0.5)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_20px_40px_-26px_rgba(30,41,59,0.56)]">
           <div className="flex items-start justify-between gap-3">
@@ -818,7 +916,6 @@ export default function Home() {
 
         <section className="rounded-[28px] border border-slate-200/60 bg-gradient-to-b from-white to-slate-50/40 p-5 shadow-[0_14px_30px_-24px_rgba(15,23,42,0.44)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_18px_34px_-26px_rgba(15,23,42,0.5)]">
           <h3 className="text-sm font-semibold text-slate-900">周期进度</h3>
-          <p className="mt-1 text-xs text-slate-400">一眼看清本轮节奏，深色=完成今日，浅灰=今天跳过，白色=待记录。</p>
           <div className="mt-2.5 grid grid-cols-10 gap-1">
             {challenge.entries.map((entry) => {
               const isCurrent = entry.dayIndex === currentDayIndex;
@@ -854,9 +951,6 @@ export default function Home() {
               );
             })}
           </div>
-          <p className="mt-3 text-xs text-slate-400">
-            橙色=有点难，蓝色=还可以，绿色=状态好。
-          </p>
         </section>
 
         <section className="rounded-[28px] border border-slate-200/60 bg-gradient-to-b from-white to-slate-50/40 p-5 shadow-[0_14px_30px_-24px_rgba(15,23,42,0.44)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_18px_34px_-26px_rgba(15,23,42,0.5)]">
@@ -878,12 +972,30 @@ export default function Home() {
                 key={`goal-${goalIndex}`}
                 className="rounded-2xl border border-slate-200/70 bg-gradient-to-b from-white to-slate-50/70 p-3.5 transition-all duration-200 hover:border-slate-300 hover:shadow-sm"
               >
-                <div className="flex items-start gap-2">
+                <div className="flex items-center gap-2">
+                  <select
+                    value={goal.type}
+                    onChange={(event) => {
+                      if (isValidGoalType(event.target.value)) {
+                        updateGoalType(goalIndex, event.target.value);
+                      }
+                    }}
+                    className="w-[32%] rounded-lg border border-slate-200 bg-white px-2 py-2 text-[16px] text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+                  >
+                    {GOAL_TYPE_OPTIONS.map((type) => (
+                      <option key={type} value={type}>
+                        {GOAL_TYPE_ZH[type]}
+                      </option>
+                    ))}
+                  </select>
                   <input
                     value={goal.title}
                     onChange={(event) => updateGoalTitle(goalIndex, event.target.value)}
-                    className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+                    className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[16px] outline-none transition focus:border-indigo-300"
                   />
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <span className="text-xs text-slate-400">{goal.completionCount} 次完成</span>
                   <button
                     type="button"
                     onClick={() => deleteGoal(goalIndex)}
@@ -892,24 +1004,6 @@ export default function Home() {
                   >
                     删除
                   </button>
-                </div>
-                <div className="mt-2 flex items-center justify-between gap-2">
-                  <select
-                    value={goal.type}
-                    onChange={(event) => {
-                      if (isValidGoalType(event.target.value)) {
-                        updateGoalType(goalIndex, event.target.value);
-                      }
-                    }}
-                    className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
-                  >
-                    {GOAL_TYPE_OPTIONS.map((type) => (
-                      <option key={type} value={type}>
-                        {GOAL_TYPE_ZH[type]}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="text-xs text-slate-400">{goal.completionCount} 次完成</span>
                 </div>
               </div>
             ))}
